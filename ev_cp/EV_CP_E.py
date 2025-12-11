@@ -1,4 +1,3 @@
-# ev_cp/EV_CP_E.py
 import socket
 import threading
 import time
@@ -9,19 +8,16 @@ import random
 import os
 import sys
 
-# --- Variables Globales de Estado ---
-is_healthy = True  # ¿Está el hardware bien? (Controlado por 'Enter')
-is_running = True  # ¿Está el CP administrativamente activo? (Controlado por Central)
-state_lock = threading.Lock() # UN solo lock para proteger AMBAS variables
+is_healthy = True 
+is_running = True 
+state_lock = threading.Lock() 
 
-# (El resto de globales se quedan igual)
 cp_id_global = None
 kafka_producer = None
 kafka_broker_global = None
 
 
 def send_kafka_message(topic, message):
-    # ... (Esta función no cambia) ...
     global kafka_producer
     try:
         if kafka_producer is None:
@@ -33,32 +29,27 @@ def send_kafka_message(topic, message):
         print(f"[KAFKA_ERROR] No se pudo enviar mensaje a {topic}: {e}")
 
 def simulate_charging(driver_id, cp_id, price_kwh):
-    """
-    Simula el proceso de carga.
-    Ahora se interrumpe si 'is_healthy' o 'is_running' son False.
-    """
-    print(f"🔌  Iniciando recarga para {driver_id} en {cp_id} (Precio: {price_kwh} €/kWh)...")
+   
+    print(f"Iniciando recarga para {driver_id} en {cp_id} (Precio: {price_kwh} €/kWh)...")
     
     start_time = time.strftime('%Y-%m-%d %H:%M:%S')
     total_kwh = 0
     total_euros = 0
     
-    charge_interrupted = None # 'AVERIA' o 'PARADO'
-    duracion_carga = random.randint(8, 20)
+    charge_interrupted = None 
+    duracion_carga = random.randint(500, 700)
     
     for i in range(duracion_carga):
         
-        # --- LÓGICA DE INTERRUPCIÓN MODIFICADA ---
         with state_lock:
             if not is_healthy:
-                print(f"\n[{cp_id}] 🚨 ¡AVERÍA DETECTADA! Finalizando suministro...")
+                print(f"\n[{cp_id}] AVERÍA DETECTADA Finalizando suministro...")
                 charge_interrupted = "AVERIA"
                 break
             if not is_running:
-                print(f"\n[{cp_id}] 🛑 ¡PARADA ADMIN DETECTADA! Finalizando suministro...")
+                print(f"\n[{cp_id}] PARADA ADMIN DETECTADA Finalizando suministro...")
                 charge_interrupted = "PARADO"
                 break
-        # --- FIN LÓGICA MODIFICADA ---
 
         time.sleep(1)
         kwh_this_second = 0.5
@@ -75,16 +66,15 @@ def simulate_charging(driver_id, cp_id, price_kwh):
 
     end_time = time.strftime('%Y-%m-%d %H:%M:%S')
     
-    # --- LÓGICA DE ESTADO FINAL MODIFICADA ---
     final_status = 'FINALIZADO'
     if charge_interrupted == "AVERIA":
         final_status = 'FINALIZADO_AVERIA'
-        print(f"❌  Recarga INTERRUMPIDA POR AVERÍA para {driver_id}.")
+        print(f"ERROR Recarga INTERRUMPIDA POR AVERÍA para {driver_id}.")
     elif charge_interrupted == "PARADO":
         final_status = 'FINALIZADO_PARADA'
-        print(f"🛑  Recarga PARADA POR CENTRAL para {driver_id}.")
+        print(f"ERROR  Recarga PARADA POR CENTRAL para {driver_id}.")
     else:
-        print(f"✅  Recarga finalizada para {driver_id}.")
+        print(f"OK  Recarga finalizada para {driver_id}.")
     
     final_data = {
         'cp_id': cp_id, 'driver_id': driver_id, 'status': final_status,
@@ -94,7 +84,6 @@ def simulate_charging(driver_id, cp_id, price_kwh):
     send_kafka_message('topic_data_streaming', final_data)
 
 def start_kafka_listener(cp_id, kafka_broker):
-    # ... (Esta función no cambia) ...
     global kafka_producer, kafka_broker_global
     kafka_broker_global = kafka_broker
     try:
@@ -109,7 +98,7 @@ def start_kafka_listener(cp_id, kafka_broker):
             value_deserializer=lambda m: json.loads(m.decode('utf-8')),
             auto_offset_reset='latest'
         )
-        print(f"✅ [KAFKA] Oyente de Kafka conectado. Escuchando en '{command_topic}'")
+        print(f"OK [KAFKA] Oyente de Kafka conectado. Escuchando en '{command_topic}'")
         for msg in consumer:
             data = msg.value
             action = data.get('action')
@@ -123,15 +112,12 @@ def start_kafka_listener(cp_id, kafka_broker):
                 )
                 charge_thread.start()
     except Exception as e:
-        print(f"❌ [KAFKA_ERROR] Fallo fatal en el oyente de Kafka: {e}")
+        print(f"ERROR [KAFKA_ERROR] Fallo fatal en el oyente de Kafka: {e}")
 
 def handle_monitor_connection(conn, addr):
-    """
-    Maneja la conexión del EV_CP_M (Monitor).
-    Ahora diferencia entre 'is_healthy' (hardware) y 'is_running' (admin).
-    """
+  
     global cp_id_global, is_healthy, is_running, state_lock
-    print(f"🔌 [SOCKET] Monitor conectado desde: {addr}")
+    print(f" [SOCKET] Monitor conectado desde: {addr}")
     
     cp_identificado = False
     
@@ -139,7 +125,7 @@ def handle_monitor_connection(conn, addr):
         while True:
             data_raw = conn.recv(1024)
             if not data_raw:
-                print("💔 [SOCKET] El Monitor se ha desconectado.")
+                print(" [SOCKET] El Monitor se ha desconectado.")
                 break
             
             messages = data_raw.decode('utf-8').strip().split('\n')
@@ -148,13 +134,11 @@ def handle_monitor_connection(conn, addr):
                 if not msg:
                     continue
                 
-                # --- LÓGICA DE COMANDOS MODIFICADA ---
                 if msg.startswith('ID;') and not cp_identificado:
-                    # ... (Lógica de ID no cambia) ...
                     cp_id = msg.split(';')[1]
                     cp_id_global = cp_id
                     cp_identificado = True
-                    print(f"🆔 [SOCKET] Este Engine ha sido identificado como: {cp_id}")
+                    print(f" [SOCKET] Este Engine ha sido identificado como: {cp_id}")
                     conn.sendall(b"ID_OK\n")
                     kafka_thread = threading.Thread(
                         target=start_kafka_listener, 
@@ -164,51 +148,48 @@ def handle_monitor_connection(conn, addr):
                     kafka_thread.start()
 
                 elif msg == "PING" and cp_identificado:
-                    # PING solo comprueba la salud del HARDWARE
                     with state_lock:
                         current_health = is_healthy
                     
                     if current_health:
-                        conn.sendall(b"OK\n") # El hardware está OK
+                        conn.sendall(b"OK\n") 
                     else:
-                        conn.sendall(b"KO\n") # El hardware está ROTO
+                        conn.sendall(b"KO\n") 
                 
                 elif msg == "FORCE_STOP" and cp_identificado:
-                    print("🚨 [SOCKET] Recibida orden de PARADA FORZOSA desde Central.")
+                    print(" [SOCKET] Recibida orden de PARADA FORZOSA desde Central.")
                     with state_lock:
-                        is_running = False # Cambia el estado admin
-                    conn.sendall(b"OK\n") # Responde OK (el hardware sigue bien)
+                        is_running = False 
+                    conn.sendall(b"OK\n") 
 
                 elif msg == "FORCE_RESUME" and cp_identificado:
-                    print("▶️ [SOCKET] Recibida orden de REANUDACIÓN desde Central.")
+                    print("▶ [SOCKET] Recibida orden de REANUDACIÓN desde Central.")
                     with state_lock:
-                        is_running = True # Cambia el estado admin
-                    conn.sendall(b"OK\n") # Responde OK
-                # --- FIN LÓGICA MODIFICADA ---
+                        is_running = True 
+                    conn.sendall(b"OK\n") 
 
                 elif not cp_identificado:
-                    print("❌ [SOCKET] El Monitor envió un PING antes de un ID. Cerrando.")
+                    print("ERROR [SOCKET] El Monitor envió un PING antes de un ID. Cerrando.")
                     conn.sendall(b"ID_FAIL\n")
                     raise ConnectionAbortedError("Protocolo incorrecto")
 
             time.sleep(0.1)
 
     except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
-        print(f"💔 [SOCKET] Conexión perdida o protocolo fallido con el Monitor {addr}")
+        print(f"vaya por dios [SOCKET] Conexión perdida o protocolo fallido con el Monitor {addr}")
     except Exception as e:
-        print(f"❌ [SOCKET] Error en la conexión con el Monitor: {e}")
+        print(f"ERROR [SOCKET] Error en la conexión con el Monitor: {e}")
     finally:
-        print("🔌 [SOCKET] Cerrando socket del Monitor.")
+        print(" [SOCKET] Cerrando socket del Monitor.")
         conn.close()
 
 def start_socket_server(port):
-    # ... (Esta función no cambia) ...
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         server.bind(('0.0.0.0', port))
         server.listen(1)
-        print(f"✅ [SOCKET] Engine Server escuchando en el puerto {port}...")
+        print(f"OK [SOCKET] Engine Server escuchando en el puerto {port}...")
         while True:
             conn, addr = server.accept()
             monitor_thread = threading.Thread(
@@ -218,28 +199,24 @@ def start_socket_server(port):
             )
             monitor_thread.start()
     except Exception as e:
-        print(f"❌ [SOCKET_ERROR] No se pudo iniciar el servidor en el puerto {port}: {e}")
+        print(f"ERROR [SOCKET_ERROR] No se pudo iniciar el servidor en el puerto {port}: {e}")
     finally:
         server.close()
 
 def failure_simulator():
-    """
-    Este hilo AHORA SOLO CONTROLA 'is_healthy' (Averías).
-    """
+    
     global is_healthy, state_lock
-    print("✅ [SIMULADOR] Simulador de averías iniciado.")
-    print("   -> Presiona [Enter] en esta terminal para simular/resolver una avería (OK <-> KO)")
+    print("OK [SIMULADOR] Simulador de averías iniciado.")
+    print("  Presiona [Enter] en esta terminal para simular/resolver una avería ")
     
     while True:
         try:
-            input() # Espera a que el usuario presione Enter
+            input() 
             
-            # --- LÓGICA DE AVERÍA MODIFICADA ---
             with state_lock:
                 is_healthy = not is_healthy
-                status = "BIEN ✅" if is_healthy else "AVERIADO ❌"
-            print(f"\n🚨 [SIMULADOR] ¡Estado de SALUD cambiado! Ahora está: {status}\n")
-            # --- FIN LÓGICA MODIFICADA ---
+                status = "BIEN OK" if is_healthy else "AVERIADO ERROR"
+            print(f"\n [SIMULADOR] ¡Estado de SALUD cambiado! Ahora está: {status}\n")
 
         except EOFError:
             break
@@ -252,11 +229,9 @@ if __name__ == "__main__":
     
     kafka_broker_global = args.kafka_broker
 
-    # 1. Iniciar el simulador de fallos en un hilo daemon
     fail_thread = threading.Thread(target=failure_simulator, daemon=True)
     fail_thread.start()
 
-    # 2. Iniciar el servidor de sockets en OTRO hilo daemon
     socket_server_thread = threading.Thread(
         target=start_socket_server, 
         args=(args.socket_port,), 
@@ -264,14 +239,12 @@ if __name__ == "__main__":
     )
     socket_server_thread.start()
 
-    # 3. El hilo principal se queda en un bucle simple
-    #    que SÍ puede ser interrumpido por Ctrl+C
-    print(f"✅ [Engine] Módulos iniciados. (PID: {os.getpid()}). Presiona Ctrl+C para salir.")
+
+    print(f"OK [Engine] Módulos iniciados. (PID: {os.getpid()}). Presiona Ctrl+C para salir.")
     try:
         while True:
-            # El hilo principal "duerme" para seguir vivo,
-            # mientras los hilos daemon hacen el trabajo.
+        
             time.sleep(5)
     except KeyboardInterrupt:
-        print("\n🔌 [Engine] Cerrando... (Ctrl+C detectado)")
+        print("\n [Engine] Cerrando... (Ctrl+C detectado)")
         sys.exit(0)

@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  # --- CP 1 (ALC1) ---
+  cp1_engine:
+    image: evcharging-app:latest
+    container_name: cp_engine_alc1
+    command: >
+      py /app/ev_cp/EV_CP_E.py
+      --socket-port 6001
+      --kafka-broker 192.168.1.102 # IP de PC 2
+
+    ports:
+      - "6001:6001"
+
+  cp1_monitor:
+    image: evcharging-app:latest
+    container_name: cp_monitor_alc1
+    depends_on: [cp1_engine]
+    command: >
+      py /app/ev_cp/EV_CP_M.py
+      --cp-id ALC1
+      --central-ip 192.168.1.102    # IP de PC 2
+      --central-port 8000
+      --engine-ip cp1_engine        # <-- ¡SOLUCIÓN! (Usa el nombre del servicio)
+      --engine-port 6001
+
+  cp2_engine:
+    image: evcharging-app:latest
+    container_name: cp_engine_mad1
+    command: >
+      py /app/ev_cp/EV_CP_E.py
+      --socket-port 6002
+      --kafka-broker 192.168.1.102
+    ports:
+      - "6002:6002"
+
+  cp2_monitor:
+    image: evcharging-app:latest
+    container_name: cp_monitor_mad1
+    depends_on: [cp2_engine]
+    command: >
+      py /app/ev_cp/EV_CP_M.py
+      --cp-id MAD1
+      --central-ip 192.168.1.102
+      --central-port 8000
+      --engine-ip cp2_engine        # <-- ¡SOLUCIÓN! (Usa el nombre del servicio)
+      --engine-port 6002
+      
+  # (Repetir para todos los demás CPs...)

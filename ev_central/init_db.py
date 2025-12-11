@@ -12,7 +12,6 @@ def create_tables():
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
-        # --- TABLA CORREGIDA ---
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ChargingPoints (
                 cp_id TEXT PRIMARY KEY,
@@ -23,7 +22,6 @@ def create_tables():
                 last_update DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # --- FIN CORRECCIÓN ---
         
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS Drivers (

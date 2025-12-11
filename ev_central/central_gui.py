@@ -9,25 +9,20 @@ from tkinter import ttk
 from tkinter import font
 import queue 
 
-# --- Constantes de Estilo (Basadas en el PDF) ---
 COLOR_VERDE = "#4CAF50"      # Activado / Suministrando
 COLOR_NARANJA = "#FF9800"   # Parado (Out of Order)
 COLOR_ROJO = "#F44336"      # Averiado
 COLOR_GRIS = "#9E9E9E"      # Desconectado
-COLOR_FONDO_REJILLA = "#333333" # Color oscuro para el fondo
-COLOR_TEXTO = "#FFFFFF"         # Texto blanco
+COLOR_FONDO_REJILLA = "#333333" 
+COLOR_TEXTO = "#FFFFFF"        
 
 class CPPanel(tk.Frame):
-    """
-    Un widget que representa un único Punto de Carga (CP) en el panel.
-    Se autogestiona para cambiar color y texto según su estado.
-    """
+   
     def __init__(self, parent, cp_id, location, price):
         super().__init__(parent, borderwidth=2, relief="solid", bg=COLOR_GRIS, padx=5, pady=5)
         
         self.cp_id = cp_id
         
-        # --- Widgets Internos ---
         self.lbl_id = tk.Label(self, text=cp_id, bg=COLOR_GRIS, fg=COLOR_TEXTO, font=("Arial", 12, "bold"))
         self.lbl_id.pack(fill="x")
         
@@ -78,10 +73,7 @@ class CPPanel(tk.Frame):
             print(f"Error actualizando panel {self.cp_id}: {e}")
 
 class CentralApp(tk.Tk):
-    """
-    Clase principal de la aplicación GUI.
-    Debe ser instanciada por EV_Central.py.
-    """
+   
     def __init__(self, gui_queue):
         super().__init__()
         self.title("SD EV CHARGING SOLUTION. MONITORIZATION PANEL")
@@ -100,7 +92,6 @@ class CentralApp(tk.Tk):
         self.backend_controller = controller
 
     def _create_widgets(self):
-        # --- 1. Título Superior ---
         title_font = font.Font(family="Arial", size=16, weight="bold")
         lbl_title = tk.Label(
             self, 
@@ -112,41 +103,27 @@ class CentralApp(tk.Tk):
         )
         lbl_title.pack(fill="x")
 
-        # --- 2. Frame Principal para la Rejilla de CPs ---
         self.grid_frame = tk.Frame(self, bg=COLOR_FONDO_REJILLA, padx=10, pady=10)
         self.grid_frame.pack(fill="x", expand=False)
         for i in range(5):
             self.grid_frame.columnconfigure(i, weight=1, uniform="cp_col")
 
-        # --- INICIO DEL CÓDIGO CORREGIDO ---
-        
-        # --- 3. Panel Inferior (Logs) ---
-        # Solo creamos el frame, NO lo empaquetamos (pack) todavía
         bottom_pane = tk.Frame(self, bg="#212121")
 
-        # --- 4. Panel de Administrador (Botones) ---
-        # Creamos el panel de admin
         admin_frame = self._create_admin_panel(self)
         
-        # *** ESTA ES LA PARTE IMPORTANTE ***
-        # Empaquetamos el panel de ADMIN primero, anclándolo ABAJO
         admin_frame.pack(fill="x", side="bottom", pady=10, padx=10)
         
-        # Ahora, empaquetamos el panel de LOGS para que llene el espacio RESTANTE
         bottom_pane.pack(fill="both", expand=True, pady=10)
         
-        # --- FIN DEL CÓDIGO CORREGIDO ---
 
-        # Configuración del panel de logs (que ahora usa .grid)
         bottom_pane.columnconfigure(0, weight=1)
         bottom_pane.rowconfigure(0, weight=1)
         bottom_pane.rowconfigure(1, weight=1)
 
-        # 3a. Panel de Peticiones (dentro de bottom_pane)
         requests_frame = self._create_requests_panel(bottom_pane)
         requests_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=(0, 5))
 
-        # 3b. Panel de Mensajes (dentro de bottom_pane)
         messages_frame = self._create_messages_panel(bottom_pane)
         messages_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(5, 0))
 
@@ -217,7 +194,6 @@ class CentralApp(tk.Tk):
         btn_reanudar = tk.Button(admin_frame, text="Reanudar CP", bg=COLOR_VERDE, fg="white", command=self._on_reanudar_cp)
         btn_reanudar.pack(side="left", padx=5)
         
-        # Enlaza la tecla "Return" (Enter) a la función de reanudar
         self.admin_cp_entry.bind("<Return>", self._on_reanudar_cp)
 
         return admin_frame
@@ -253,7 +229,6 @@ class CentralApp(tk.Tk):
         self.messages_listbox.see("end") 
 
     def _on_parar_cp(self):
-        # Añadimos .strip() para eliminar espacios en blanco
         cp_id = self.admin_cp_entry.get().strip() 
 
         if not cp_id:
@@ -265,9 +240,7 @@ class CentralApp(tk.Tk):
         else:
             self._add_app_message("ERROR: Backend controller no está conectado.")
 
-    # (event=None) permite que sea llamado por un clic (sin evento) o por la tecla Enter (con evento)
     def _on_reanudar_cp(self, event=None): 
-        # Añadimos .strip() para eliminar espacios en blanco
         cp_id = self.admin_cp_entry.get().strip() 
 
         if not cp_id:

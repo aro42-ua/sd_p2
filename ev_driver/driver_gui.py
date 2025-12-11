@@ -1,13 +1,9 @@
-"""
-Módulo driver_gui.py
-Contiene la clase DriverApp (la ventana principal de Tkinter) para el cliente.
-"""
 import tkinter as tk
 from tkinter import ttk
 from tkinter import font, filedialog, messagebox
 import queue
+import os
 
-# --- Constantes de Estilo (Basadas en la Central) ---
 COLOR_VERDE = "#4CAF50"
 COLOR_ROJO = "#F44336"
 COLOR_GRIS = "#9E9E9E"
@@ -15,7 +11,6 @@ COLOR_FONDO = "#333333"
 COLOR_TEXTO = "#FFFFFF"
 
 class DriverApp(tk.Tk):
-    """Clase principal de la aplicación GUI del Conductor."""
     
     def __init__(self, gui_queue):
         super().__init__()
@@ -26,12 +21,10 @@ class DriverApp(tk.Tk):
         self.gui_queue = gui_queue
         self.backend_controller = None
         
-        # Almacén local para el estado de los CPs
         self.cp_status_map = {}
         
         self._create_widgets()
         
-        # Iniciar el poller de la cola
         self.after(100, self._process_queue)
 
     def set_controller(self, controller):
@@ -39,23 +32,18 @@ class DriverApp(tk.Tk):
         self.backend_controller = controller
 
     def _create_widgets(self):
-        # --- Layout Principal (2 columnas) ---
         self.columnconfigure(0, weight=1)
         self.columnconfigure(1, weight=3)
-        self.rowconfigure(0, weight=0) # Fila de conexión
-        self.rowconfigure(1, weight=1) # Fila de contenido
-        self.rowconfigure(2, weight=1) # Fila de log
+        self.rowconfigure(0, weight=0) 
+        self.rowconfigure(1, weight=1) 
+        self.rowconfigure(2, weight=1) 
 
-        # --- 1. Frame de Conexión ---
         self._create_connect_frame().grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         
-        # --- 2. Frame de Peticiones (Izquierda) ---
         self._create_request_frame().grid(row=1, column=0, sticky="nsew", padx=(0, 5))
         
-        # --- 3. Frame de Lista de CPs (Derecha) ---
         self._create_cp_list_frame().grid(row=1, column=1, sticky="nsew", padx=(5, 0))
         
-        # --- 4. Frame de Log (Abajo) ---
         self._create_message_log_frame().grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
 
     def _create_connect_frame(self):
@@ -67,7 +55,7 @@ class DriverApp(tk.Tk):
         
         tk.Label(frame, text="Kafka Broker:", bg=COLOR_FONDO, fg=COLOR_TEXTO).pack(side="left", padx=(10, 2))
         self.entry_kafka_broker = tk.Entry(frame, width=20)
-        self.entry_kafka_broker.insert(0, "localhost:9092") # Valor por defecto
+        self.entry_kafka_broker.insert(0, "localhost:9092")
         self.entry_kafka_broker.pack(side="left", padx=2)
         
         self.btn_connect = tk.Button(frame, text="Conectar", command=self._on_connect, bg=COLOR_VERDE, fg=COLOR_TEXTO)
@@ -78,7 +66,6 @@ class DriverApp(tk.Tk):
     def _create_request_frame(self):
         frame = tk.LabelFrame(self, text=" Realizar Petición ", fg=COLOR_TEXTO, bg=COLOR_FONDO, padx=10, pady=10)
         
-        # --- Estado Actual ---
         tk.Label(frame, text="Estado de Carga Actual:", fg=COLOR_TEXTO, bg=COLOR_FONDO, font=("Arial", 12, "bold")).pack(pady=5)
         self.lbl_current_cp = tk.Label(frame, text="CP: ---", fg=COLOR_TEXTO, bg=COLOR_FONDO, font=("Arial", 10))
         self.lbl_current_cp.pack()
@@ -87,14 +74,12 @@ class DriverApp(tk.Tk):
         self.lbl_euros = tk.Label(frame, text="0.00 €", fg=COLOR_VERDE, bg=COLOR_FONDO, font=("Arial", 14, "bold"))
         self.lbl_euros.pack()
         
-        # --- Petición Manual ---
         tk.Label(frame, text="ID del CP Manual:", fg=COLOR_TEXTO, bg=COLOR_FONDO).pack(pady=(15, 2))
         self.entry_manual_cp = tk.Entry(frame, width=15)
         self.entry_manual_cp.pack(pady=2)
         self.btn_request_manual = tk.Button(frame, text="Solicitar Carga Manual", command=self._on_request_charge, state="disabled")
         self.btn_request_manual.pack(pady=5)
         
-        # --- Petición por Archivo ---
         self.btn_request_file = tk.Button(frame, text="Cargar Servicios desde Archivo", command=self._on_load_file, state="disabled")
         self.btn_request_file.pack(pady=(15, 5))
         
@@ -110,7 +95,6 @@ class DriverApp(tk.Tk):
         style.map('Treeview', background=[('selected', '#0D47A1')])
         style.configure("Treeview.Heading", background="#444444", foreground="white", font=("Arial", 10, "bold"))
 
-        # Definir 'tags' para los colores de estado
         style.configure("green.Treeview", foreground=COLOR_VERDE)
         style.configure("red.Treeview", foreground=COLOR_ROJO)
         style.configure("grey.Treeview", foreground=COLOR_GRIS)
@@ -133,7 +117,6 @@ class DriverApp(tk.Tk):
         self.log_listbox.pack(fill="both", expand=True)
         return frame
 
-    # --- Callbacks de Botones (GUI -> Backend) ---
 
     def _on_connect(self):
         driver_id = self.entry_driver_id.get()
@@ -164,25 +147,29 @@ class DriverApp(tk.Tk):
             self.entry_manual_cp.delete(0, "end")
 
     def _on_load_file(self):
-        file_path = filedialog.askopenfilename(
-            title="Seleccionar archivo de servicios",
-            filetypes=(("Archivos de Texto", "*.txt"), ("Todos los archivos", "*.*"))
-        )
-        if not file_path:
-            return
+        
+            try:
+                # __file__ es la ruta de este script (driver_gui.py)
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                file_path = os.path.join(script_dir, "services.txt")
             
-        if self.backend_controller:
-            self.backend_controller.start_file_services(file_path)
-
-    # --- Métodos de Actualización (Backend -> GUI) ---
-    
+                if not os.path.exists(file_path):
+                    messagebox.showerror("Error", f"No se encontró el archivo 'services.txt' en:\n{file_path}")
+                    return
+            
+                if self.backend_controller:
+                    self.backend_controller.start_file_services(file_path)
+                else:
+                    self._add_log_message("ERROR: Backend no conectado.")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Fallo al cargar services.txt: {e}")
+        
     def _add_log_message(self, message):
-        """Añade un mensaje al log de la aplicación."""
         self.log_listbox.insert("end", message)
-        self.log_listbox.see("end") # Auto-scroll
+        self.log_listbox.see("end") 
         
     def _update_charge_display(self, data):
-        """Actualiza los labels de kWh y Euros en tiempo real."""
         cp_id = data.get('cp_id', '---')
         kwh = data.get('kwh', data.get('kwh_actual', 0.0))
         euros = data.get('euros', data.get('euros_actual', 0.0))
@@ -192,13 +179,11 @@ class DriverApp(tk.Tk):
         self.lbl_euros.config(text=f"{euros:.2f} €")
         
     def _reset_charge_display(self):
-        """Resetea los labels de carga al estado inicial."""
         self.lbl_current_cp.config(text="CP: ---")
         self.lbl_kwh.config(text="0.0 kWh")
         self.lbl_euros.config(text="0.00 €")
         
     def _update_cp_list(self, data):
-        """Inserta o actualiza una fila en la lista de CPs."""
         cp_id = data.get('cp_id')
         if not cp_id:
             return
@@ -207,7 +192,6 @@ class DriverApp(tk.Tk):
         price = data.get('price_kwh', 'N/A')
         status = data.get('status', 'N/A')
         
-        # Asignar un tag de color
         tag = ''
         if status == 'ACTIVADO':
             tag = 'green'
@@ -219,17 +203,13 @@ class DriverApp(tk.Tk):
         values = (cp_id, loc, price, status)
         
         if cp_id in self.cp_status_map:
-            # Actualizar item existente
             self.cp_tree.item(self.cp_status_map[cp_id], values=values, tags=(tag,))
         else:
-            # Insertar nuevo item
             item_id = self.cp_tree.insert("", "end", values=values, tags=(tag,))
             self.cp_status_map[cp_id] = item_id
 
-    # --- Gestión de la Cola ---
     
     def _process_queue(self):
-        """Procesa mensajes de la cola de la GUI."""
         try:
             while True:
                 message = self.gui_queue.get_nowait()
@@ -248,6 +228,6 @@ class DriverApp(tk.Tk):
                     self._update_cp_list(data)
 
         except queue.Empty:
-            pass # No hay nada en la cola
+            pass 
         finally:
             self.after(100, self._process_queue)

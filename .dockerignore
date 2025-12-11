@@ -1,0 +1,8 @@
+ev_central/ev_central.db
+
+# Ignorar archivos de estado de Driver
+driver_state_*.json
+
+# Ignorar archivos temporales de Python
+__pycache__/
+*.pyc
