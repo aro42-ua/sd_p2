@@ -19,7 +19,8 @@ def create_tables():
                 price_kwh REAL NOT NULL,
                 status TEXT DEFAULT 'DESCONECTADO',
                 last_heartbeat DATETIME DEFAULT CURRENT_TIMESTAMP,
-                last_update DATETIME DEFAULT CURRENT_TIMESTAMP
+                last_update DATETIME DEFAULT CURRENT_TIMESTAMP,
+                encryption_key TEXT  -- <--- NUEVO CAMPO
             )
         """)
         

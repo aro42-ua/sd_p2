@@ -101,8 +101,18 @@ def health_check_loop(engine_ip, engine_port, cp_id):
                     time.sleep(5)
                     continue
                 
-                conn_obj.settimeout(None) # Quitamos timeout para operación normal
-                print(f"[{cp_id}-Monitor] OK Conectado y autenticado con Engine.")
+                # --- NUEVO: ENVIAR CLAVE DE CIFRADO AL ENGINE ---
+                # Usamos una variable global encryption_key que rellenamos al registrarnos
+                global encryption_key
+                if encryption_key:
+                    print(f"[{cp_id}-Monitor] 🔑 Enviando clave de cifrado al Engine...")
+                    conn_obj.sendall(f"KEY;{encryption_key}\n".encode('utf-8'))
+                    # Esperamos confirmación simple (opcional, pero recomendado)
+                    # engine_resp = conn_obj.recv(1024) 
+                # ------------------------------------------------
+                
+                conn_obj.settimeout(None)
+                print(f"[{cp_id}-Monitor] OK Conectado y autenticado con Engine.")      
                 with engine_lock:
                     engine_conn = conn_obj
             except Exception:

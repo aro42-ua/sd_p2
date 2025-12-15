@@ -9,51 +9,60 @@ import os
 import logging
 from datetime import datetime
 from kafka import KafkaConsumer, KafkaProducer
-
-# --- NUEVO RELEASE 2: Importamos Flask para la API REST ---
 from flask import Flask, jsonify, request
+from flask_cors import CORS
+from cryptography.fernet import Fernet # <--- IMPORTANTE: Para descifrar
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PARENT_DIR = os.path.dirname(SCRIPT_DIR)
-sys.path.append(PARENT_DIR)
-
-from central_gui import CentralApp  
-
+# --- CONFIGURACIÓN ---
 DB_NAME = 'ev_central.db'
 SOCKET_HOST = '0.0.0.0'
-SOCKET_PORT = 8000     # Puerto para los CPs (Legacy Sockets)
-API_PORT = 5000        # NUEVO: Puerto para API REST (Front y Weather)
+SOCKET_PORT = 8000     # Puerto para Sockets (CPs)
+API_PORT = 5000        # Puerto para API REST (Web y Clima)
 KAFKA_SERVER = 'localhost:9092'
 HEARTBEAT_TIMEOUT = 15
 
-# --- NUEVO RELEASE 2: Inicializamos la aplicación Flask ---
+# --- VARIABLES GLOBALES ---
+active_socket_connections = {} 
+connections_lock = threading.Lock()
+producer = None        
+gui_queue_global = None 
+
+# --- INICIALIZACIÓN FLASK ---
 app_flask = Flask(__name__)
-
-# Desactivamos el log de Flask para que no ensucie la consola
+CORS(app_flask) 
 log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR)
+log.setLevel(logging.ERROR) 
 
+# -------------------------------------------------------------------------
+# SISTEMA DE AUDITORÍA
+# -------------------------------------------------------------------------
+def log_audit(source_ip, action, description):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"{timestamp} | IP: {source_ip} | ACTION: {action} | DESC: {description}"
+    print(f"🔒 [AUDIT] {entry}")
+    try:
+        with open("system_audit.log", "a", encoding="utf-8") as f:
+            f.write(entry + "\n")
+    except Exception as e:
+        print(f"Error escribiendo auditoría: {e}")
+
+# -------------------------------------------------------------------------
+# FUNCIONES BBDD
+# -------------------------------------------------------------------------
 def get_db_connection():
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
-# -------------------------------------------------------------------------
-# FUNCIONES DE BASE DE DATOS
-# -------------------------------------------------------------------------
-
 def update_cp_status_in_db(cp_id, new_status):
     conn = None
     try:
         conn = get_db_connection()
-        conn.execute(
-            "UPDATE ChargingPoints SET status = ?, last_update = CURRENT_TIMESTAMP WHERE cp_id = ?",
-            (new_status, cp_id)
-        )
+        conn.execute("UPDATE ChargingPoints SET status = ?, last_update = CURRENT_TIMESTAMP WHERE cp_id = ?", (new_status, cp_id))
         conn.commit()
     except sqlite3.Error as e:
-        print(f"[DB_ERROR] al actualizar estado: {e}")
+        print(f"[DB_ERROR] Update status: {e}")
     finally:
         if conn: conn.close()
 
@@ -61,18 +70,16 @@ def register_cp_in_db(cp_id, location, price):
     conn = None
     try:
         conn = get_db_connection()
-        conn.execute(
-            """
+        # NOTA: En Release 2, el registro real lo hace el EV_Registry.
+        # Aquí solo aseguramos que exista por si entra por socket legacy.
+        conn.execute("""
             INSERT INTO ChargingPoints (cp_id, location, price_kwh, status, last_heartbeat, last_update)
             VALUES (?, ?, ?, 'DESCONECTADO', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            ON CONFLICT(cp_id) DO UPDATE SET
-                last_update = CURRENT_TIMESTAMP
-            """,
-            (cp_id, location, price)
-        )
+            ON CONFLICT(cp_id) DO UPDATE SET last_update = CURRENT_TIMESTAMP
+        """, (cp_id, location, price))
         conn.commit()
     except sqlite3.Error as e:
-        print(f"[DB_ERROR] al registrar CP: {e}")
+        print(f"[DB_ERROR] Register CP: {e}")
     finally:
         if conn: conn.close()
             
@@ -80,13 +87,10 @@ def update_cp_heartbeat(cp_id):
     conn = None
     try:
         conn = get_db_connection()
-        conn.execute(
-            "UPDATE ChargingPoints SET last_heartbeat = CURRENT_TIMESTAMP WHERE cp_id = ?",
-            (cp_id,)
-        )
+        conn.execute("UPDATE ChargingPoints SET last_heartbeat = CURRENT_TIMESTAMP WHERE cp_id = ?", (cp_id,))
         conn.commit()
     except sqlite3.Error as e:
-        print(f"[DB_ERROR] al actualizar heartbeat: {e}")
+        print(f"[DB_ERROR] Heartbeat: {e}")
     finally:
         if conn: conn.close()
 
@@ -100,8 +104,8 @@ def get_cp_info_from_db(cp_id):
         if result:
             info['status'] = result['status']
             info['price_kwh'] = result['price_kwh']
-    except sqlite3.Error as e:
-        print(f"[DB_ERROR] al leer info de CP: {e}")
+    except sqlite3.Error:
+        pass
     finally:
         if conn: conn.close()
     return info
@@ -111,25 +115,20 @@ def get_charge_history_for_driver(driver_id):
     conn = None
     try:
         conn = get_db_connection()
-        cursor = conn.execute(
-            "SELECT * FROM ChargeLog WHERE driver_id = ? ORDER BY start_time DESC LIMIT 10", 
-            (driver_id,)
-        )
+        cursor = conn.execute("SELECT * FROM ChargeLog WHERE driver_id = ? ORDER BY start_time DESC LIMIT 10", (driver_id,))
         for row in cursor.fetchall():
             logs.append(dict(row))
-    except sqlite3.Error as e:
-        print(f"[DB_ERROR] al buscar historial para {driver_id}: {e}")
+    except sqlite3.Error:
+        pass
     finally:
         if conn: conn.close()
     return logs
 
-# --- NUEVO RELEASE 2: Función para devolver TODOS los CPs al Front ---
 def get_all_cps_status():
     cps = []
     conn = None
     try:
         conn = get_db_connection()
-        # Seleccionamos datos para el dashboard web
         cursor = conn.execute("SELECT cp_id, location, status, price_kwh, last_update FROM ChargingPoints")
         for row in cursor.fetchall():
             cps.append(dict(row))
@@ -137,369 +136,348 @@ def get_all_cps_status():
         if conn: conn.close()
     return cps
 
-def broadcast_status_change(producer, cp_id, new_status, location=None, price=None):
+def get_all_encryption_keys():
+    """Recupera todas las claves de cifrado disponibles para intentar descifrar mensajes."""
+    keys = {}
+    conn = None
+    try:
+        conn = get_db_connection()
+        # Solo traemos los que tienen clave
+        cursor = conn.execute("SELECT cp_id, encryption_key FROM ChargingPoints WHERE encryption_key IS NOT NULL")
+        for row in cursor.fetchall():
+            keys[row['cp_id']] = row['encryption_key']
+    except: pass
+    finally:
+        if conn: conn.close()
+    return keys
+
+def broadcast_status_change(kafka_prod, cp_id, new_status, location=None, price=None):
+    if not kafka_prod: return
     payload = {'cp_id': cp_id, 'status': new_status}
     if location: payload['location'] = location
     if price: payload['price_kwh'] = price
+    try:
+        # Los mensajes de estado hacia el Driver/GUI van en claro (públicos)
+        kafka_prod.send('topic_status_broadcast', payload)
+        kafka_prod.flush()
+    except Exception as e:
+        print(f"[KAFKA ERROR] Broadcast failed: {e}")
+
+# -------------------------------------------------------------------------
+# LÓGICA DE CONTROL GLOBAL
+# -------------------------------------------------------------------------
+def send_admin_command_global(cp_id, new_status, socket_cmd):
+    global producer, active_socket_connections, gui_queue_global
+    target_conn = None
+    with connections_lock:
+        target_conn = active_socket_connections.get(cp_id)
         
-    producer.send('topic_status_broadcast', payload)
-    producer.flush()
+    if target_conn:
+        try:
+            target_conn.sendall(f"{socket_cmd}\n".encode('utf-8'))
+        except Exception as e:
+            print(f"[API] Error socket {cp_id}: {e}")
+    
+    update_cp_status_in_db(cp_id, new_status)
+    broadcast_status_change(producer, cp_id, new_status)
+        
+    if gui_queue_global:
+        gui_queue_global.put(("ADD_MESSAGE", f"[SISTEMA] {cp_id} -> {new_status}"))
+        gui_queue_global.put(("UPDATE_CP", cp_id, new_status, None))
+    
+    return True
 
 # -------------------------------------------------------------------------
-# NUEVO RELEASE 2: ENDPOINTS DE LA API REST (FLASK)
+# API REST FLASK
 # -------------------------------------------------------------------------
-
 @app_flask.route('/api/cps', methods=['GET'])
 def api_list_cps():
-    """
-    Endpoint para el FRONTEND.
-    Devuelve la lista completa de CPs y su estado en formato JSON.
-    """
-    cps = get_all_cps_status()
-    return jsonify(cps)
+    return jsonify(get_all_cps_status())
 
 @app_flask.route('/api/alert/weather', methods=['POST'])
 def api_weather_alert():
-    """
-    Endpoint para EV_W (Weather Control Office).
-    Recibe alertas de temperatura baja.
-    """
     data = request.json
-    location = data.get('location')
-    alert = data.get('alert') # True si hace frío
+    location_alert = data.get('location', '')
+    is_cold = data.get('alert', False)
+    requester_ip = request.remote_addr 
     
-    print(f"[API REST] Alerta Clima recibida para {location}: Alerta={alert}")
-    
-    # Aquí irá la lógica de parar CPs en el futuro.
-    return jsonify({"status": "received", "action": "pending_logic"})
+    print(f"🌍 [API CLIMA] Alerta para '{location_alert}': Frío={is_cold}")
+    log_audit(requester_ip, "WEATHER_ALERT", f"Alerta clima: {location_alert}. Frio={is_cold}")
+
+    conn = get_db_connection()
+    cursor = conn.execute("SELECT cp_id, location, status FROM ChargingPoints")
+    affected = []
+    for row in cursor.fetchall():
+        if location_alert.lower() in row['location'].lower():
+            affected.append(dict(row))
+    conn.close()
+
+    actions = []
+    for cp in affected:
+        cp_id = cp['cp_id']
+        status = cp['status']
+        if is_cold:
+            if status not in ('PARADO', 'AVERIADO', 'DESCONECTADO'):
+                send_admin_command_global(cp_id, 'PARADO', 'STOP_CP')
+                actions.append(f"{cp_id} STOPPED")
+        else:
+            if status == 'PARADO':
+                send_admin_command_global(cp_id, 'ACTIVADO', 'RESUME_CP')
+                actions.append(f"{cp_id} RESUMED")
+
+    return jsonify({"status": "processed", "actions": actions})
 
 def run_flask_server():
-    """Ejecuta Flask en un hilo propio en puerto 5000"""
-    print(f"OK [API] Servidor REST iniciado en puerto {API_PORT}...")
     app_flask.run(host='0.0.0.0', port=API_PORT, debug=False, use_reloader=False)
 
 # -------------------------------------------------------------------------
-# SERVIDOR DE SOCKETS (LEGACY)
+# SERVIDOR SOCKETS (LEGACY & AUTH)
 # -------------------------------------------------------------------------
-
-def send_socket_message(conn, message_str):
+def handle_socket_client(conn, addr, producer, gui_queue):
+    global active_socket_connections
+    source_ip = addr[0]
+    print(f"[SOCKET] Conexión: {addr}")
+    
+    cp_id = None
     try:
-        conn.sendall(f"{message_str}\n".encode('utf-8'))
-    except (BrokenPipeError, ConnectionResetError):
-        print(f"[SOCKET_SEND] Error: La conexión ya estaba cerrada.")
+        data = conn.recv(1024).decode('utf-8').strip()
+        if not data: return
+        parts = data.split('\n')[0].split(';') 
+        cmd = parts[0]
 
-def handle_socket_client(conn, addr, producer, active_connections, lock, gui_queue):
-    print(f"[SOCKET] Nueva conexión desde: {addr}")
-    cp_id_autenticado = None
-    try:
-        data = conn.recv(1024).decode('utf-8')
-        if not data:
-            conn.close()
-            return
-            
-        messages = data.strip().split('\n')
-        msg = messages[0]
-        parts = msg.strip().split(';')
-        command = parts[0]
-
-        if command == 'GET_HISTORY':
-            driver_id = parts[1]
-            history_logs = get_charge_history_for_driver(driver_id)            
-            response_json = json.dumps(history_logs)
-            conn.sendall(response_json.encode('utf-8'))
-            conn.close()
-            return 
-
-        elif command == 'REGISTER':
-            # Mantenemos esto para que el CP abra el canal de socket
-            cp_id_autenticado = parts[1]
-            location = parts[2]
-            price = float(parts[3])
-            
-            # Registramos/Actualizamos en DB
-            register_cp_in_db(cp_id_autenticado, location, price)
-            update_cp_status_in_db(cp_id_autenticado, "DESCONECTADO") 
-            
-            print(f"CP '{cp_id_autenticado}' conectado al Socket.")
+        if cmd == 'REGISTER':
+            cp_id = parts[1]
+            # Registro legacy (por si no usa Registry)
+            register_cp_in_db(cp_id, parts[2], float(parts[3]))
+            update_cp_status_in_db(cp_id, "DESCONECTADO")
             conn.send(b"ACK;REGISTER_OK\n")
             
-            with lock:
-                active_connections[cp_id_autenticado] = conn
+            with connections_lock:
+                active_socket_connections[cp_id] = conn
             
-            gui_queue.put(("ADD_MESSAGE", f"CP '{cp_id_autenticado}' CONECTADO (Socket)."))
-
+            gui_queue.put(("ADD_MESSAGE", f"CP '{cp_id}' CONECTADO (Socket)."))
+            log_audit(source_ip, "AUTH_CP", f"CP {cp_id} conectado vía Socket")
+        
+        elif cmd == 'GET_HISTORY':
+            driver_id = parts[1]
+            logs = get_charge_history_for_driver(driver_id)
+            conn.sendall(json.dumps(logs).encode('utf-8'))
+            conn.close()
+            log_audit(source_ip, "DATA_ACCESS", f"Driver {driver_id} solicitó historial")
+            return
         else:
             conn.close()
             return
 
         while True:
             data = conn.recv(1024).decode('utf-8')
-            if not data: break 
+            if not data: break
             
-            messages = data.strip().split('\n')
-            for msg in messages:
-                if not msg: continue
-                parts = msg.strip().split(';')
-                command = parts[0]
+            for line in data.strip().split('\n'):
+                if not line: continue
+                parts = line.split(';')
                 
-                if command == 'HEARTBEAT' and cp_id_autenticado:
-                    update_cp_heartbeat(cp_id_autenticado)
+                if parts[0] == 'HEARTBEAT':
+                    update_cp_heartbeat(cp_id)
                     conn.send(b"ACK;HEARTBEAT_OK\n")
                 
-                elif command == 'STATUS' and cp_id_autenticado:
+                elif parts[0] == 'STATUS':
                     new_status = parts[1]
-                    update_cp_status_in_db(cp_id_autenticado, new_status)
-                    if new_status == 'ACTIVADO':
-                        update_cp_heartbeat(cp_id_autenticado)
+                    update_cp_status_in_db(cp_id, new_status)
+                    if new_status == 'ACTIVADO': update_cp_heartbeat(cp_id)
                     
-                    broadcast_status_change(producer, cp_id_autenticado, new_status)
+                    broadcast_status_change(producer, cp_id, new_status)
+                    gui_queue.put(("UPDATE_CP", cp_id, new_status, None))
                     conn.send(b"ACK;STATUS_UPDATED\n")
-                    
-                    gui_queue.put(("ADD_MESSAGE", f"CP '{cp_id_autenticado}' estado: {new_status}"))
-                    gui_queue.put(("UPDATE_CP", cp_id_autenticado, new_status, None))
-                
-    except (ConnectionResetError, BrokenPipeError):
-        pass
-    except Exception as e:
-        print(f"[SOCKET] Error con {addr}: {e}")
-    finally:
-        if cp_id_autenticado:
-            print(f"🔌 [SOCKET] Conexión cerrada con '{cp_id_autenticado}'.")
-            update_cp_status_in_db(cp_id_autenticado, "DESCONECTADO")
-            broadcast_status_change(producer, cp_id_autenticado, "DESCONECTADO")
-            with lock:
-                active_connections.pop(cp_id_autenticado, None)
-            gui_queue.put(("ADD_MESSAGE", f"CP '{cp_id_autenticado}' Socket cerrado"))
-            gui_queue.put(("UPDATE_CP", cp_id_autenticado, "DESCONECTADO", None))
-        if conn: conn.close()
 
-def start_socket_server(producer, active_connections, lock, gui_queue):
+    except Exception as e:
+        print(f"[SOCKET] Error {addr}: {e}")
+    finally:
+        if cp_id:
+            print(f"[SOCKET] Cerrando {cp_id}")
+            update_cp_status_in_db(cp_id, "DESCONECTADO")
+            broadcast_status_change(producer, cp_id, "DESCONECTADO")
+            gui_queue.put(("UPDATE_CP", cp_id, "DESCONECTADO", None))
+            with connections_lock:
+                active_socket_connections.pop(cp_id, None)
+        conn.close()
+
+def start_socket_server(gui_queue):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((SOCKET_HOST, SOCKET_PORT))
     server.listen(5)
-    print(f"OK [CONTROL] Servidor Sockets escuchando en {SOCKET_PORT}...")
-    gui_queue.put(("ADD_MESSAGE", f"Servidor Sockets OK en puerto {SOCKET_PORT}"))
-
+    print(f"OK [SOCKETS] Escuchando en {SOCKET_PORT}...")
     while True:
         conn, addr = server.accept()
-        t = threading.Thread(target=handle_socket_client, args=(conn, addr, producer, active_connections, lock, gui_queue), daemon=True)
-        t.start()
+        threading.Thread(target=handle_socket_client, args=(conn, addr, producer, gui_queue), daemon=True).start()
 
 # -------------------------------------------------------------------------
-# KAFKA Y VIGILANCIA
+# KAFKA LISTENER CON DESCIFRADO (NUEVO RELEASE 2)
 # -------------------------------------------------------------------------
+def start_kafka_listener(gui_queue):
+    # OJO: Quitamos value_deserializer para recibir bytes crudos (cifrados)
+    consumer = KafkaConsumer(
+        'topic_requests', 'topic_data_streaming',
+        bootstrap_servers=KAFKA_SERVER,
+        auto_offset_reset='latest'
+    )
+    print("OK [KAFKA] Listener iniciado (Modo Seguro).")
 
-def start_kafka_listener(producer, gui_queue):
-    try:
-        consumer = KafkaConsumer(
-            'topic_requests', 'topic_data_streaming',
-            bootstrap_servers=KAFKA_SERVER,
-            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-            auto_offset_reset='latest'
-        )
-        print(f"OK [DATOS] Oyente de Kafka conectado...")
-
-        for msg in consumer:
-            try:
-                data = msg.value
-                
-                if msg.topic == 'topic_requests':
-                    cp_id = data['cp_id']
-                    driver_id = data['driver_id']
-                    response_topic = data.get('response_topic')
-                    
-                    now = datetime.now()
-                    gui_queue.put(("ADD_REQUEST", now.strftime("%d/%m"), now.strftime("%H:%M"), driver_id, cp_id))
-
-                    cp_info = get_cp_info_from_db(cp_id)
-                    status = cp_info['status']
-                    price_kwh = cp_info['price_kwh']
-                    
-                    if status == 'ACTIVADO':
-                        # Estado intermedio para evitar zombies
-                        update_cp_status_in_db(cp_id, 'ESPERANDO_INICIO')
-                        broadcast_status_change(producer, cp_id, 'ESPERANDO_INICIO')
-                        
-                        producer.send(f'topic_commands_{cp_id}', {
-                            'action': 'START_CHARGE', 'driver_id': driver_id, 'price_kwh': price_kwh
-                        })
-                        
-                        if response_topic:
-                            producer.send(response_topic, {'status': 'APPROVED', 'cp_id': cp_id, 'driver_id': driver_id})
-                        
-                        gui_queue.put(("UPDATE_CP", cp_id, "ESPERANDO_INICIO", None))
-                        gui_queue.put(("ADD_MESSAGE", f"Petición aprobada para {driver_id} en {cp_id}."))
-
-                    else:
-                        if response_topic:
-                            producer.send(response_topic, {'status': 'DENIED', 'cp_id': cp_id, 'driver_id': driver_id, 'reason': f"Estado: {status}"})
-                        gui_queue.put(("ADD_MESSAGE", f"Petición DENEGADA para {cp_id}"))
-
-                elif msg.topic == 'topic_data_streaming':
-                    charge_status = data.get('status')
-                    cp_id = data.get('cp_id')
-
-                    if charge_status == 'SUMINISTRANDO':
-                        cp_info = get_cp_info_from_db(cp_id)
-                        if cp_info['status'] != 'SUMINISTRANDO':
-                            update_cp_status_in_db(cp_id, 'SUMINISTRANDO')
-                            broadcast_status_change(producer, cp_id, 'SUMINISTRANDO')
-                        
-                        gui_data = {
-                            "driver": data.get('driver_id'),
-                            "kwh": f"{data.get('kwh', 0.0):.1f}",
-                            "eur": f"{data.get('euros', 0.0):.2f}"
-                        }
-                        gui_queue.put(("UPDATE_CP", cp_id, "SUMINISTRANDO", gui_data))
-                    
-                    elif charge_status in ('FINALIZADO', 'FINALIZADO_AVERIA', 'FINALIZADO_PARADA'):
-                        conn = get_db_connection()
-                        conn.execute("INSERT INTO ChargeLog (cp_id, driver_id, start_time, end_time, total_kwh, total_euros) VALUES (?,?,?,?,?,?)",
-                            (cp_id, data.get('driver_id'), data.get('start_time'), data.get('end_time'), data.get('total_kwh'), data.get('total_euros')))
-                        conn.commit()
-                        conn.close()
-
-                        new_st = 'ACTIVADO'
-                        if charge_status == 'FINALIZADO_AVERIA': new_st = 'AVERIADO'
-                        elif charge_status == 'FINALIZADO_PARADA': new_st = 'PARADO'
-
-                        update_cp_status_in_db(cp_id, new_st)
-                        broadcast_status_change(producer, cp_id, new_st)
-                        gui_queue.put(("UPDATE_CP", cp_id, new_st, None))
-
-            except Exception as e:
-                print(f"[KAFKA] Error procesando mensaje: {e}")
-    except Exception as e:
-        print(f"Error fatal en Kafka: {e}")
-
-def check_cp_heartbeats(producer, gui_queue):
-    while True:
-        time.sleep(5)
-        conn = None
+    for msg in consumer:
         try:
-            conn = get_db_connection()
-            # Detectar muertos (> 15s sin heartbeat)
-            cursor = conn.execute(
-                "SELECT cp_id FROM ChargingPoints WHERE status != 'DESCONECTADO' AND (STRFTIME('%s','now') - STRFTIME('%s', last_heartbeat)) > ?", 
-                (HEARTBEAT_TIMEOUT,))
-            for row in cursor.fetchall():
-                cp_id = row['cp_id']
-                print(f"ERROR Heartbeat perdido {cp_id}.")
-                update_cp_status_in_db(cp_id, 'DESCONECTADO')
-                broadcast_status_change(producer, cp_id, 'DESCONECTADO')
-                gui_queue.put(("UPDATE_CP", cp_id, "DESCONECTADO", None))
+            data = None
+            raw_bytes = msg.value
             
-            # Limpieza de Zombies (ESPERANDO_INICIO > 15s)
-            cursor_stuck = conn.execute(
-                "SELECT cp_id FROM ChargingPoints WHERE status = 'ESPERANDO_INICIO' AND (STRFTIME('%s', 'now') - STRFTIME('%s', last_update)) > 15"
-            )
-            for row in cursor_stuck.fetchall():
-                cp_id = row['cp_id']
-                update_cp_status_in_db(cp_id, 'ACTIVADO')
-                broadcast_status_change(producer, cp_id, 'ACTIVADO')
-                gui_queue.put(("UPDATE_CP", cp_id, "ACTIVADO", None))
+            # --- INTENTO DE DESCIFRADO ---
+            if msg.topic == 'topic_data_streaming':
+                decrypted = False
+                all_keys = get_all_encryption_keys() # Obtenemos claves de BBDD
+                
+                # 1. Probamos con todas las claves conocidas
+                for cp_id, key_str in all_keys.items():
+                    try:
+                        f = Fernet(key_str.encode('utf-8'))
+                        decoded_bytes = f.decrypt(raw_bytes)
+                        data = json.loads(decoded_bytes.decode('utf-8'))
+                        decrypted = True
+                        # print(f"🔓 [SEC] Mensaje descifrado de {cp_id}")
+                        break
+                    except:
+                        continue # Clave incorrecta, probar siguiente
+                
+                # 2. Fallback: Si no descifra, probar texto plano (por compatibilidad)
+                if not decrypted:
+                    try:
+                        data = json.loads(raw_bytes.decode('utf-8'))
+                    except:
+                        # print(f"⚠️ [SEC] Mensaje basura o indescifrable en streaming")
+                        continue
+            else:
+                # topic_requests (Drivers) asumimos texto plano
+                try:
+                    data = json.loads(raw_bytes.decode('utf-8'))
+                except: continue
+
+            # --- PROCESAMIENTO DE DATOS (IGUAL QUE ANTES) ---
+            if not data: continue
+
+            if msg.topic == 'topic_requests':
+                cp_id, driver = data['cp_id'], data['driver_id']
+                cp_info = get_cp_info_from_db(cp_id)
+                status = cp_info.get('status')
+                gui_queue.put(("ADD_REQUEST", datetime.now().strftime("%d/%m"), datetime.now().strftime("%H:%M"), driver, cp_id))
+
+                if status == 'ACTIVADO':
+                    update_cp_status_in_db(cp_id, 'ESPERANDO_INICIO')
+                    broadcast_status_change(producer, cp_id, 'ESPERANDO_INICIO')
+                    producer.send(f'topic_commands_{cp_id}', {
+                        'action': 'START_CHARGE', 'driver_id': driver, 'price_kwh': cp_info['price_kwh']
+                    })
+                    if 'response_topic' in data:
+                        producer.send(data['response_topic'], {'status': 'APPROVED', 'cp_id': cp_id})
+                    gui_queue.put(("UPDATE_CP", cp_id, "ESPERANDO_INICIO", None))
+                    log_audit("KAFKA", "CHARGE_APPROVED", f"Carga aprobada {driver}@{cp_id}")
+                else:
+                    if 'response_topic' in data:
+                        producer.send(data['response_topic'], {'status': 'DENIED', 'cp_id': cp_id, 'reason': status})
+                    log_audit("KAFKA", "CHARGE_DENIED", f"Carga denegada {driver}@{cp_id}")
+
+            elif msg.topic == 'topic_data_streaming':
+                status, cp_id = data.get('status'), data.get('cp_id')
+                
+                if status == 'SUMINISTRANDO':
+                    conn = get_db_connection()
+                    curr = conn.execute("SELECT status FROM ChargingPoints WHERE cp_id=?", (cp_id,)).fetchone()
+                    conn.close()
+                    if curr and curr['status'] != 'SUMINISTRANDO':
+                        update_cp_status_in_db(cp_id, 'SUMINISTRANDO')
+                        broadcast_status_change(producer, cp_id, 'SUMINISTRANDO')
+                    
+                    gui_data = {"driver": data.get('driver_id'), "kwh": f"{data.get('kwh',0):.1f}", "eur": f"{data.get('euros',0):.2f}"}
+                    gui_queue.put(("UPDATE_CP", cp_id, "SUMINISTRANDO", gui_data))
+                
+                elif status in ('FINALIZADO', 'FINALIZADO_AVERIA', 'FINALIZADO_PARADA'):
+                    try:
+                        c = get_db_connection()
+                        c.execute("INSERT INTO ChargeLog (cp_id, driver_id, start_time, end_time, total_kwh, total_euros) VALUES (?,?,?,?,?,?)",
+                            (cp_id, data.get('driver_id'), data.get('start_time'), data.get('end_time'), data.get('total_kwh'), data.get('total_euros')))
+                        c.commit()
+                        c.close()
+                    except: pass
+
+                    new_st = 'ACTIVADO'
+                    if status == 'FINALIZADO_AVERIA': new_st = 'AVERIADO'
+                    elif status == 'FINALIZADO_PARADA': new_st = 'PARADO'
+                    
+                    update_cp_status_in_db(cp_id, new_st)
+                    broadcast_status_change(producer, cp_id, new_st)
+                    gui_queue.put(("UPDATE_CP", cp_id, new_st, None))
 
         except Exception as e:
-            print(f"Watchdog error: {e}")
-        finally:
-            if conn: conn.close()
+            print(f"Error Kafka Msg: {e}")
 
-def get_initial_cps_from_db():
-    cps = []
-    conn = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.execute("SELECT cp_id, location, price_kwh FROM ChargingPoints ORDER BY cp_id")
-        rows = cursor.fetchall()
-        for i, row in enumerate(rows):
-            cps.append({
-                "id": row['cp_id'],
-                "loc": row['location'],
-                "price": f"{row['price_kwh']:.2f}€/kWh",
-                "grid_row": i // 5,
-                "grid_col": i % 5
-            })
-    except Exception:
-        pass
-    finally:
-        if conn: conn.close()
-    return cps
+# -------------------------------------------------------------------------
+# MAIN
+# -------------------------------------------------------------------------
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.dirname(SCRIPT_DIR)
+sys.path.append(PARENT_DIR)
+from central_gui import CentralApp
 
 class BackendConnector:
-    def __init__(self, producer, active_connections, lock, gui_queue):
-        self.producer = producer
-        self.active_connections = active_connections
-        self.lock = lock
-        self.gui_queue = gui_queue
-
+    def __init__(self, gui_queue): pass
+    
     def request_parar_cp(self, cp_id):
-        self._send_admin_command(cp_id, 'PARADO', 'STOP_CP')
-
-    def request_reanudar_cp(self, cp_id):
-        self._send_admin_command(cp_id, 'ACTIVADO', 'RESUME_CP')
-
-    def _send_admin_command(self, cp_id, new_status, socket_cmd):
-        target_conn = None
-        with self.lock:
-            target_conn = self.active_connections.get(cp_id)
+        log_audit("LOCALHOST", "ADMIN_STOP", f"Parada manual {cp_id}")
+        send_admin_command_global(cp_id, 'PARADO', 'STOP_CP')
         
-        if target_conn:
-            try:
-                send_socket_message(target_conn, socket_cmd)
-                update_cp_status_in_db(cp_id, new_status)
-                broadcast_status_change(self.producer, cp_id, new_status)
-                self.gui_queue.put(("ADD_MESSAGE", f"Comando '{new_status}' enviado a {cp_id}."))
-                self.gui_queue.put(("UPDATE_CP", cp_id, new_status, None))
-            except Exception as e:
-                print(f" Error enviando comando a {cp_id}: {e}")
-        else:
-            self.gui_queue.put(("ADD_MESSAGE", f"ERROR: {cp_id} no está conectado (socket)."))
+    def request_reanudar_cp(self, cp_id):
+        log_audit("LOCALHOST", "ADMIN_RESUME", f"Reanudación manual {cp_id}")
+        send_admin_command_global(cp_id, 'ACTIVADO', 'RESUME_CP')
 
 if __name__ == "__main__":
-    active_socket_connections = {} 
-    connections_lock = threading.Lock()
-    gui_queue = queue.Queue()
-
+    # 1. Asegurar BBDD
     if not os.path.exists(DB_NAME):
-        try:
-            import init_db, populate_db
-            init_db.create_tables()
-            populate_db.populate_data()
-        except: pass
+        import init_db, populate_db
+        init_db.create_tables()
+        populate_db.populate_data()
 
+    # 2. Conectar Kafka
     try:
-        producer = KafkaProducer(bootstrap_servers=KAFKA_SERVER, value_serializer=lambda v: json.dumps(v).encode('utf-8'))
+        producer = KafkaProducer(
+            bootstrap_servers=KAFKA_SERVER, 
+            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+        )
     except Exception as e:
-        print(f"Error Kafka: {e}")
+        print(f"FATAL: Kafka no disponible ({e}). Asegúrate de que Docker está corriendo.")
         sys.exit(1)
 
+    # 3. Iniciar Hilos y Colas
+    gui_queue = queue.Queue()
+    gui_queue_global = gui_queue
+
+    threading.Thread(target=start_socket_server, args=(gui_queue,), daemon=True).start()
+    threading.Thread(target=start_kafka_listener, args=(gui_queue,), daemon=True).start()
+    threading.Thread(target=run_flask_server, daemon=True).start()
+
+    # 4. Iniciar GUI con datos adaptados
     app = CentralApp(gui_queue)
-    backend = BackendConnector(producer, active_socket_connections, connections_lock, gui_queue)
-    app.set_controller(backend)
-    app.load_initial_cps(get_initial_cps_from_db())
-
-    # Hilo 1: Sockets (Legacy) - Puerto 8000
-    t_socket = threading.Thread(target=start_socket_server, args=(producer, active_socket_connections, connections_lock, gui_queue), daemon=True)
-    t_socket.start()
-
-    # Hilo 2: Kafka
-    t_kafka = threading.Thread(target=start_kafka_listener, args=(producer, gui_queue), daemon=True)
-    t_kafka.start()
-
-    # Hilo 3: Watchdog
-    t_wd = threading.Thread(target=check_cp_heartbeats, args=(producer, gui_queue), daemon=True)
-    t_wd.start()
+    app.set_controller(BackendConnector(gui_queue))
     
-    # Hilo 4: API REST Flask (NUEVO RELEASE 2) - Puerto 5000
-    t_flask = threading.Thread(target=run_flask_server, daemon=True)
-    t_flask.start()
-
-    print(f"--- CENTRAL INICIADA (Sockets: {SOCKET_PORT} | API REST: {API_PORT}) ---")
+    # --- CORRECCIÓN AQUÍ: Adaptar datos de DB a formato GUI ---
+    raw_cps = get_all_cps_status()
+    gui_cps = []
+    for i, cp in enumerate(raw_cps):
+        gui_cps.append({
+            "id": cp['cp_id'],                  # La GUI espera "id", la DB tiene "cp_id"
+            "loc": cp['location'],              # La GUI espera "loc", la DB tiene "location"
+            "price": f"{cp['price_kwh']:.2f}€/kWh",
+            "grid_row": i // 5,                 # Calculamos posición en rejilla
+            "grid_col": i % 5
+        })
+    app.load_initial_cps(gui_cps) 
+    # ----------------------------------------------------------
     
-    try:
-        app.mainloop()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        producer.close()
+    print("--- CENTRAL READY (Secure Mode) ---")
+    app.mainloop()

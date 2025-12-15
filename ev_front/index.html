@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EV Charging Network - Public Dashboard</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1e1e1e;
+            color: #f0f0f0;
+            margin: 0;
+            padding: 20px;
+        }
+        .header {
+            background-color: #0d47a1;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            background-color: #333;
+            padding: 10px 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-weight: bold;
+        }
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 20px;
+        }
+        .cp-card {
+            background-color: #2d2d2d;
+            border: 2px solid #444;
+            border-radius: 10px;
+            padding: 15px;
+            transition: transform 0.2s;
+        }
+        .cp-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.5);
+        }
+        .cp-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+            border-bottom: 1px solid #444;
+            padding-bottom: 5px;
+        }
+        .cp-id { font-size: 1.2em; font-weight: bold; }
+        .cp-temp { font-size: 0.9em; color: #ffeb3b; }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+        /* Colores de estado */
+        .st-ACTIVADO { background-color: #4CAF50; color: #4CAF50; border-color: #4CAF50;} /* Verde */
+        .st-SUMINISTRANDO { background-color: #2196F3; color: #2196F3; border-color: #2196F3; animation: pulse 2s infinite;} /* Azul */
+        .st-PARADO { background-color: #FF9800; color: #FF9800; border-color: #FF9800;} /* Naranja */
+        .st-AVERIADO { background-color: #F44336; color: #F44336; border-color: #F44336;} /* Rojo */
+        .st-DESCONECTADO { background-color: #9E9E9E; color: #9E9E9E; border-color: #9E9E9E;} /* Gris */
+        .st-ESPERANDO_INICIO { background-color: #FFEB3B; color: #FFEB3B; border-color: #FFEB3B;} /* Amarillo */
+
+        .info-row { margin: 5px 0; font-size: 0.9em; color: #ccc; }
+        .price-tag { float: right; font-weight: bold; color: #fff; }
+
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(33, 150, 243, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(33, 150, 243, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(33, 150, 243, 0); }
+        }
+        .error-msg { color: #F44336; text-align: center; margin-top: 20px; display: none;}
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>⚡ EV Charging Network - Public View</h1>
+        <p>Monitorización en tiempo real - Release 2</p>
+    </div>
+
+    <div class="status-bar">
+        <span id="system-time">--:--:--</span>
+        <span id="api-status">Conectando con Central...</span>
+    </div>
+
+    <div id="error-box" class="error-msg">⚠️ No se puede conectar con la API de Central (Puerto 5000)</div>
+
+    <div class="grid-container" id="cp-grid">
+        </div>
+
+    <script>
+        const API_URL = 'http://localhost:5000/api/cps';
+
+        function updateTime() {
+            const now = new Date();
+            document.getElementById('system-time').innerText = now.toLocaleTimeString();
+        }
+
+        async function fetchCPs() {
+            try {
+                const response = await fetch(API_URL);
+                if (!response.ok) throw new Error('Network response was not ok');
+                
+                const data = await response.json();
+                renderCPs(data);
+                
+                document.getElementById('api-status').innerText = "🟢 API Online";
+                document.getElementById('api-status').style.color = "#4CAF50";
+                document.getElementById('error-box').style.display = 'none';
+            } catch (error) {
+                console.error('Error fetching data:', error);
+                document.getElementById('api-status').innerText = "🔴 API Offline";
+                document.getElementById('api-status').style.color = "#F44336";
+                document.getElementById('error-box').style.display = 'block';
+            }
+        }
+
+        function renderCPs(cps) {
+            const grid = document.getElementById('cp-grid');
+            grid.innerHTML = ''; // Limpiar grid
+
+            cps.forEach(cp => {
+                // Determinar clase de estado para colores
+                const statusClass = `st-${cp.status}`;
+                
+                // Card HTML
+                const card = document.createElement('div');
+                card.className = `cp-card ${statusClass}`;
+                card.style.borderWidth = "1px";
+                
+                card.innerHTML = `
+                    <div class="cp-header">
+                        <span class="cp-id">⛽ ${cp.cp_id}</span>
+                        <span class="status-indicator ${statusClass}"></span>
+                    </div>
+                    <div class="info-row">📍 ${cp.location}</div>
+                    <div class="info-row">
+                        Estado: <strong style="color: inherit">${cp.status}</strong>
+                    </div>
+                    <div class="info-row">
+                        Precio: <span class="price-tag">${cp.price_kwh.toFixed(2)} €/kWh</span>
+                    </div>
+                    <div class="info-row" style="margin-top: 10px; font-size: 0.8em; color: #888;">
+                        Última act: ${cp.last_update}
+                    </div>
+                `;
+                grid.appendChild(card);
+            });
+        }
+
+        // Actualizar cada 3 segundos
+        setInterval(fetchCPs, 3000);
+        setInterval(updateTime, 1000);
+        
+        // Primera carga
+        fetchCPs();
+    </script>
+</body>
+</html>

@@ -64,17 +64,18 @@ def register_cp():
         # Inicialmente lo marcamos como DESCONECTADO hasta que conecte su Socket con Central.
         conn.execute(
             """
-            INSERT INTO ChargingPoints (cp_id, location, price_kwh, status, last_update)
-            VALUES (?, ?, ?, 'DESCONECTADO', CURRENT_TIMESTAMP)
+            INSERT INTO ChargingPoints (cp_id, location, price_kwh, status, last_update, encryption_key)
+            VALUES (?, ?, ?, 'DESCONECTADO', CURRENT_TIMESTAMP, ?)
             ON CONFLICT(cp_id) DO UPDATE SET
                 location = excluded.location,
                 price_kwh = excluded.price_kwh,
+                encryption_key = excluded.encryption_key,
                 last_update = CURRENT_TIMESTAMP
             """,
-            (cp_id, location, price)
+            (cp_id, location, price, enc_key) # <--- Pasamos enc_key aquí
         )
         conn.commit()
-        print(f"[REGISTRY] ✅ CP {cp_id} registrado/actualizado en BBDD.")
+        print(f"[REGISTRY]  CP {cp_id} registrado/actualizado en BBDD.")
         
         # Devolvemos las credenciales al Monitor del CP
         response = {

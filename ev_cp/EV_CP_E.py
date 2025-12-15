@@ -8,6 +8,10 @@ import random
 import os
 import sys
 
+# --- NUEVO RELEASE 2: Importamos Fernet para el cifrado ---
+from cryptography.fernet import Fernet
+
+# --- VARIABLES GLOBALES DE ESTADO ---
 is_healthy = True 
 is_running = True 
 state_lock = threading.Lock() 
@@ -16,20 +20,44 @@ cp_id_global = None
 kafka_producer = None
 kafka_broker_global = None
 
+# Variable para guardar el objeto cifrador
+encryption_suite = None 
 
-def send_kafka_message(topic, message):
-    global kafka_producer
+def send_kafka_message(topic, message_dict):
+    """
+    Envía mensajes a Kafka.
+    Si tenemos clave de cifrado (Release 2), cifra el contenido.
+    Si no, lo envía en claro (Legacy/Fallback).
+    """
+    global kafka_producer, encryption_suite
     try:
         if kafka_producer is None:
             print("[KAFKA_ERROR] El productor no está inicializado.")
             return
-        kafka_producer.send(topic, message)
+        
+        # 1. Convertimos el diccionario a JSON string
+        msg_str = json.dumps(message_dict)
+        
+        # 2. CIFRADO (NUEVO RELEASE 2)
+        if encryption_suite:
+            # Fernet necesita bytes. Encodificamos y ciframos.
+            # El resultado 'token' son bytes cifrados.
+            token = encryption_suite.encrypt(msg_str.encode('utf-8'))
+            
+            # Enviamos los bytes cifrados directamente
+            kafka_producer.send(topic, token)
+            # (Opcional) Descomentar para depurar cifrado:
+            # print(f"🔐 [KAFKA] Mensaje cifrado enviado a {topic}")
+        else:
+            # Modo sin cifrar (Release 1)
+            kafka_producer.send(topic, msg_str.encode('utf-8'))
+            
         kafka_producer.flush()
     except Exception as e:
         print(f"[KAFKA_ERROR] No se pudo enviar mensaje a {topic}: {e}")
 
 def simulate_charging(driver_id, cp_id, price_kwh):
-   
+    """Simula el proceso de carga y envía telemetría."""
     print(f"Iniciando recarga para {driver_id} en {cp_id} (Precio: {price_kwh} €/kWh)...")
     
     start_time = time.strftime('%Y-%m-%d %H:%M:%S')
@@ -37,7 +65,7 @@ def simulate_charging(driver_id, cp_id, price_kwh):
     total_euros = 0
     
     charge_interrupted = None 
-    duracion_carga = random.randint(500, 700)
+    duracion_carga = random.randint(10, 30) # Reducido para pruebas rápidas
     
     for i in range(duracion_carga):
         
@@ -84,14 +112,20 @@ def simulate_charging(driver_id, cp_id, price_kwh):
     send_kafka_message('topic_data_streaming', final_data)
 
 def start_kafka_listener(cp_id, kafka_broker):
+    """Escucha comandos desde Central (START_CHARGE, etc.)"""
     global kafka_producer, kafka_broker_global
     kafka_broker_global = kafka_broker
     try:
         kafka_producer = KafkaProducer(
             bootstrap_servers=kafka_broker,
-            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+            # Serializer lo hacemos manual en send_kafka_message para poder cifrar
+            value_serializer=None 
         )
         command_topic = f'topic_commands_{cp_id}'
+        
+        # El consumidor de comandos NO suele ir cifrado en esta arquitectura simple
+        # (Central -> Engine), pero si lo estuviera, habría que descifrar aquí.
+        # Asumimos comandos en plano para simplificar la corrección.
         consumer = KafkaConsumer(
             command_topic,
             bootstrap_servers=kafka_broker,
@@ -115,8 +149,8 @@ def start_kafka_listener(cp_id, kafka_broker):
         print(f"ERROR [KAFKA_ERROR] Fallo fatal en el oyente de Kafka: {e}")
 
 def handle_monitor_connection(conn, addr):
-  
-    global cp_id_global, is_healthy, is_running, state_lock
+    """Gestiona la conexión con el Monitor local (EV_CP_M)."""
+    global cp_id_global, is_healthy, is_running, state_lock, encryption_suite
     print(f" [SOCKET] Monitor conectado desde: {addr}")
     
     cp_identificado = False
@@ -134,12 +168,15 @@ def handle_monitor_connection(conn, addr):
                 if not msg:
                     continue
                 
+                # --- IDENTIFICACIÓN ---
                 if msg.startswith('ID;') and not cp_identificado:
                     cp_id = msg.split(';')[1]
                     cp_id_global = cp_id
                     cp_identificado = True
                     print(f" [SOCKET] Este Engine ha sido identificado como: {cp_id}")
                     conn.sendall(b"ID_OK\n")
+                    
+                    # Iniciamos Kafka
                     kafka_thread = threading.Thread(
                         target=start_kafka_listener, 
                         args=(cp_id, kafka_broker_global), 
@@ -147,6 +184,19 @@ def handle_monitor_connection(conn, addr):
                     )
                     kafka_thread.start()
 
+                # --- RECEPCIÓN DE CLAVE DE CIFRADO (NUEVO RELEASE 2) ---
+                elif msg.startswith('KEY;') and cp_identificado:
+                    key_str = msg.split(';')[1]
+                    try:
+                        # Inicializamos el objeto Fernet con la clave recibida
+                        encryption_suite = Fernet(key_str.encode('utf-8'))
+                        print(f"🔐 [SEGURIDAD] Clave de cifrado recibida y activada.")
+                        # (Opcional) Confirmar al monitor
+                        # conn.sendall(b"KEY_OK\n") 
+                    except Exception as e:
+                        print(f"❌ [SEGURIDAD] Error activando clave de cifrado: {e}")
+
+                # --- HEALTH CHECK ---
                 elif msg == "PING" and cp_identificado:
                     with state_lock:
                         current_health = is_healthy
@@ -156,31 +206,31 @@ def handle_monitor_connection(conn, addr):
                     else:
                         conn.sendall(b"KO\n") 
                 
+                # --- COMANDOS DE CONTROL ---
                 elif msg == "FORCE_STOP" and cp_identificado:
-                    print(" [SOCKET] Recibida orden de PARADA FORZOSA desde Central.")
+                    print(" [SOCKET] Recibida orden de PARADA FORZOSA.")
                     with state_lock:
                         is_running = False 
                     conn.sendall(b"OK\n") 
 
                 elif msg == "FORCE_RESUME" and cp_identificado:
-                    print("▶ [SOCKET] Recibida orden de REANUDACIÓN desde Central.")
+                    print("▶ [SOCKET] Recibida orden de REANUDACIÓN.")
                     with state_lock:
                         is_running = True 
                     conn.sendall(b"OK\n") 
 
                 elif not cp_identificado:
-                    print("ERROR [SOCKET] El Monitor envió un PING antes de un ID. Cerrando.")
+                    print("ERROR [SOCKET] Protocolo incorrecto: Falta ID.")
                     conn.sendall(b"ID_FAIL\n")
                     raise ConnectionAbortedError("Protocolo incorrecto")
 
             time.sleep(0.1)
 
     except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
-        print(f"vaya por dios [SOCKET] Conexión perdida o protocolo fallido con el Monitor {addr}")
+        print(f" [SOCKET] Conexión perdida con el Monitor.")
     except Exception as e:
         print(f"ERROR [SOCKET] Error en la conexión con el Monitor: {e}")
     finally:
-        print(" [SOCKET] Cerrando socket del Monitor.")
         conn.close()
 
 def start_socket_server(port):
@@ -204,21 +254,17 @@ def start_socket_server(port):
         server.close()
 
 def failure_simulator():
-    
     global is_healthy, state_lock
-    print("OK [SIMULADOR] Simulador de averías iniciado.")
-    print("  Presiona [Enter] en esta terminal para simular/resolver una avería ")
+    print("OK [SIMULADOR] Simulador de averías iniciado (Presiona Enter para cambiar estado).")
     
     while True:
         try:
-            input() 
-            
+            sys.stdin.read(1) # Espera un caracter (Enter)
             with state_lock:
                 is_healthy = not is_healthy
-                status = "BIEN OK" if is_healthy else "AVERIADO ERROR"
-            print(f"\n [SIMULADOR] ¡Estado de SALUD cambiado! Ahora está: {status}\n")
-
-        except EOFError:
+                status = "BIEN (OK)" if is_healthy else "AVERIADO (ERROR)"
+            print(f"\n [SIMULADOR] Estado cambiado a: {status}\n")
+        except:
             break
 
 if __name__ == "__main__":
@@ -229,22 +275,10 @@ if __name__ == "__main__":
     
     kafka_broker_global = args.kafka_broker
 
+    # Hilo para simular averías con Enter
     fail_thread = threading.Thread(target=failure_simulator, daemon=True)
     fail_thread.start()
 
-    socket_server_thread = threading.Thread(
-        target=start_socket_server, 
-        args=(args.socket_port,), 
-        daemon=True
-    )
-    socket_server_thread.start()
-
-
-    print(f"OK [Engine] Módulos iniciados. (PID: {os.getpid()}). Presiona Ctrl+C para salir.")
-    try:
-        while True:
-        
-            time.sleep(5)
-    except KeyboardInterrupt:
-        print("\n [Engine] Cerrando... (Ctrl+C detectado)")
-        sys.exit(0)
+    # Hilo principal: Servidor de Sockets
+    print(f"OK [Engine] Iniciando (PID: {os.getpid()})...")
+    start_socket_server(args.socket_port)
